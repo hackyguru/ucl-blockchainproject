@@ -10,7 +10,7 @@ import "@openzeppelin/contracts/governance/extensions/GovernorTimelockControl.so
 
 /**
  * @title DatingGovernance
- * @dev Governance contract for the dating protocol
+ * @dev Governance contract for the dating protocol with support for matching parameters
  */
 contract DatingGovernance is
     Governor,
@@ -20,25 +20,24 @@ contract DatingGovernance is
     GovernorVotesQuorumFraction,
     GovernorTimelockControl
 {
-    // Proposal states
-    enum ProposalState {
-        Pending,
-        Active,
-        Canceled,
-        Defeated,
-        Succeeded,
-        Queued,
-        Expired,
-        Executed
+    // Matching parameters that can be governed
+    struct MatchingParameters {
+        uint256 weeklyStakeAmount;
+        uint256 matchingInterval;
+        uint256 minCompatibilityScore;
+        uint256 maxMatchesPerWeek;
+        uint256 stakingBonusRate;
     }
 
+    MatchingParameters public matchingParams;
+
     // Events
-    event ProposalCreated(
-        uint256 proposalId,
-        address proposer,
-        string description,
-        uint256 startBlock,
-        uint256 endBlock
+    event MatchingParametersUpdated(
+        uint256 weeklyStakeAmount,
+        uint256 matchingInterval,
+        uint256 minCompatibilityScore,
+        uint256 maxMatchesPerWeek,
+        uint256 stakingBonusRate
     );
 
     constructor(
@@ -51,14 +50,67 @@ contract DatingGovernance is
     )
         Governor("Dating Protocol Governance")
         GovernorSettings(
-            _votingDelay, // voting delay in blocks
-            _votingPeriod, // voting period in blocks
-            _proposalThreshold // proposal threshold in tokens
+            _votingDelay,
+            _votingPeriod,
+            _proposalThreshold
         )
         GovernorVotes(_token)
         GovernorVotesQuorumFraction(_quorumPercentage)
         GovernorTimelockControl(_timelock)
-    {}
+    {
+        // Initialize default matching parameters
+        matchingParams = MatchingParameters({
+            weeklyStakeAmount: 1 ether,
+            matchingInterval: 7 days,
+            minCompatibilityScore: 60, // 60% minimum compatibility
+            maxMatchesPerWeek: 1,
+            stakingBonusRate: 5 // 5% bonus for consecutive stakes
+        });
+    }
+
+    /**
+     * @dev Update matching parameters through governance
+     * @param _params New matching parameters
+     */
+    function updateMatchingParameters(MatchingParameters memory _params)
+        external
+        onlyGovernance
+    {
+        require(_params.weeklyStakeAmount > 0, "Invalid stake amount");
+        require(_params.matchingInterval > 0, "Invalid interval");
+        require(_params.minCompatibilityScore <= 100, "Invalid compatibility score");
+        require(_params.maxMatchesPerWeek > 0, "Invalid max matches");
+        require(_params.stakingBonusRate <= 100, "Invalid bonus rate");
+
+        matchingParams = _params;
+
+        emit MatchingParametersUpdated(
+            _params.weeklyStakeAmount,
+            _params.matchingInterval,
+            _params.minCompatibilityScore,
+            _params.maxMatchesPerWeek,
+            _params.stakingBonusRate
+        );
+    }
+
+    /**
+     * @dev Get current matching parameters
+     */
+    function getMatchingParameters() external view returns (MatchingParameters memory) {
+        return matchingParams;
+    }
+
+    /**
+     * @dev Override of the propose function to include matching parameter proposals
+     */
+    function propose(
+        address[] memory targets,
+        uint256[] memory values,
+        bytes[] memory calldatas,
+        string memory description
+    ) public override(Governor, IGovernor) returns (uint256) {
+        return super.propose(targets, values, calldatas, description);
+    }
 
     /**
      * @dev Get voting delay in blocks
@@ -85,7 +137,7 @@ contract DatingGovernance is
     }
 
     /**
-     * @dev Get proposal threshold in tokens
+     * @dev Get proposal threshold
      */
     function proposalThreshold()
         public
@@ -97,7 +149,7 @@ contract DatingGovernance is
     }
 
     /**
-     * @dev Get quorum at a specific block number
+     * @dev Get quorum
      */
     function quorum(uint256 blockNumber)
         public
@@ -109,7 +161,7 @@ contract DatingGovernance is
     }
 
     /**
-     * @dev Get the state of a proposal
+     * @dev Get proposal state
      */
     function state(uint256 proposalId)
         public
@@ -117,33 +169,11 @@ contract DatingGovernance is
         override(Governor, GovernorTimelockControl)
         returns (ProposalState)
     {
-        return ProposalState(uint8(super.state(proposalId)));
+        return super.state(proposalId);
     }
 
     /**
-     * @dev Create a new proposal
-     */
-    function propose(
-        address[] memory targets,
-        uint256[] memory values,
-        bytes[] memory calldatas,
-        string memory description
-    ) public override(Governor, IGovernor) returns (uint256) {
-        uint256 proposalId = super.propose(targets, values, calldatas, description);
-        
-        emit ProposalCreated(
-            proposalId,
-            msg.sender,
-            description,
-            proposalSnapshot(proposalId),
-            proposalDeadline(proposalId)
-        );
-        
-        return proposalId;
-    }
-
-    /**
-     * @dev Queue a successful proposal for execution
+     * @dev Execute proposal
      */
     function _execute(
         uint256 proposalId,
@@ -156,7 +186,7 @@ contract DatingGovernance is
     }
 
     /**
-     * @dev Cancel a proposal
+     * @dev Cancel proposal
      */
     function _cancel(
         address[] memory targets,
@@ -168,7 +198,7 @@ contract DatingGovernance is
     }
 
     /**
-     * @dev Get the executor (timelock) address
+     * @dev Get executor
      */
     function _executor()
         internal
@@ -180,7 +210,7 @@ contract DatingGovernance is
     }
 
     /**
-     * @dev Check if an account has voted on a proposal
+     * @dev Check if account has voted
      */
     function hasVoted(uint256 proposalId, address account)
         public

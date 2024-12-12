@@ -23,8 +23,8 @@ describe("Dating Protocol", function () {
     [owner, user1, user2] = await ethers.getSigners();
 
     // Deploy mock WorldID contract
-    const WorldIDMock = await ethers.getContractFactory("WorldIDMock");
-    worldcoinMock = await WorldIDMock.deploy();
+    const WorldIDVerifier = await ethers.getContractFactory("WorldIDVerifier");
+    worldcoinMock = await WorldIDVerifier.deploy();
     await worldcoinMock.deployed();
 
     // Deploy governance token
