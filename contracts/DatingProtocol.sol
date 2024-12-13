@@ -18,6 +18,9 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
     uint256 public constant QUESTIONS_COUNT = 10;
     uint256 public constant WEEKLY_STAKE_AMOUNT = 1 ether; // 1 token
     uint256 public constant MATCHING_INTERVAL = 7 days;
+    uint256 public constant TEAM_SHARE = 20;
+    uint256 public constant REWARDS_SHARE = 30;
+    uint256 public constant TREASURY_SHARE = 50;
 
     // Worldcoin integration
     IWorldID public worldId;
@@ -68,6 +71,11 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
     event StakeUpdated(address indexed user, uint256 amount, uint256 expiry);
     event WeeklyMatchingCompleted(uint256 matchesCount);
 
+    // Treasury addresses
+    address public teamWallet;
+    address public rewardsPool;
+    address public treasuryWallet;
+
     constructor(
         address _worldId,
         uint256 _externalNullifier,
@@ -77,6 +85,32 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
         externalNullifier = _externalNullifier;
         governanceToken = IERC20(_governanceToken);
         lastMatchingTime = block.timestamp;
+    }
+
+    /**
+     * @dev Verify user with WorldID
+     * @param root The root of the Merkle tree
+     * @param groupId The group ID for verification
+     * @param signalHash Hash of the signal
+     * @param nullifierHash Hash of the nullifier
+     * @param proof The zero-knowledge proof
+     */
+    function verifyWithWorldID(
+        uint256 root,
+        uint256 groupId,
+        uint256 signalHash,
+        uint256 nullifierHash,
+        uint256[8] calldata proof
+    ) external {
+        worldId.verifyProof(
+            root,
+            groupId,
+            signalHash,
+            nullifierHash,
+            proof
+        );
+        verifiedUsers[msg.sender] = true;
+        emit UserVerified(msg.sender, true, false);
     }
 
     /**
@@ -278,11 +312,73 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Withdraw accumulated fees
+     * @dev Set treasury addresses for fee distribution
+     * @param _teamWallet Team wallet address
+     * @param _rewardsPool Rewards pool address
+     * @param _treasuryWallet Treasury wallet address
      */
-    function withdrawFees() external onlyOwner {
+    function setTreasuryAddresses(
+        address _teamWallet,
+        address _rewardsPool,
+        address _treasuryWallet
+    ) external onlyOwner {
+        require(_teamWallet != address(0), "Invalid team wallet");
+        require(_rewardsPool != address(0), "Invalid rewards pool");
+        require(_treasuryWallet != address(0), "Invalid treasury wallet");
+        
+        teamWallet = _teamWallet;
+        rewardsPool = _rewardsPool;
+        treasuryWallet = _treasuryWallet;
+    }
+
+    /**
+     * @dev Withdraw and distribute accumulated fees
+     */
+    function withdrawFees() external nonReentrant {
         uint256 balance = governanceToken.balanceOf(address(this));
         require(balance > 0, "No fees to withdraw");
-        governanceToken.transfer(owner(), balance);
+
+        // Calculate shares
+        uint256 teamShare = balance * TEAM_SHARE / 100;
+        uint256 rewardsShare = balance * REWARDS_SHARE / 100;
+        uint256 treasuryShare = balance * TREASURY_SHARE / 100;
+
+        // Transfer shares
+        require(governanceToken.transfer(teamWallet, teamShare), "Team transfer failed");
+        require(governanceToken.transfer(rewardsPool, rewardsShare), "Rewards transfer failed");
+        require(governanceToken.transfer(treasuryWallet, treasuryShare), "Treasury transfer failed");
+    }
+
+    /**
+     * @dev Get user profile
+     * @param user Address of the user
+     * @return UserProfile struct containing user's profile data
+     */
+    function getProfile(address user) external view returns (UserProfile memory) {
+        return profiles[user];
+    }
+
+    /**
+     * @dev Remove a user from the matching queue
+     * @param user Address of the user to remove
+     */
+    function removeFromQueue(address user) internal {
+        for (uint256 i = 0; i < matchingQueue.length; i++) {
+            if (matchingQueue[i] == user) {
+                // Swap with last element and pop
+                matchingQueue[i] = matchingQueue[matchingQueue.length - 1];
+                matchingQueue.pop();
+                break;
+            }
+        }
+    }
+
+    /**
+     * @dev Get matches for a user
+     * @param user Address of the user
+     * @return Array of addresses representing matches
+     */
+    function getUserMatches(address user) external view returns (address[] memory) {
+        return userMatches[user];
     }
 } 
