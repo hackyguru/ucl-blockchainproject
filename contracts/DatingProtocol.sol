@@ -70,6 +70,7 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
     event UserVerified(address indexed user, bool worldcoin, bool privy);
     event StakeUpdated(address indexed user, uint256 amount, uint256 expiry);
     event WeeklyMatchingCompleted(uint256 matchesCount);
+    event FeesDistributed(uint256 teamAmount, uint256 rewardsAmount, uint256 treasuryAmount);
 
     // Treasury addresses
     address public teamWallet;
@@ -81,6 +82,9 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
         uint256 _externalNullifier,
         address _governanceToken
     ) {
+        require(_worldId != address(0), "Invalid WorldID address");
+        require(_governanceToken != address(0), "Invalid token address");
+        
         worldId = IWorldID(_worldId);
         externalNullifier = _externalNullifier;
         governanceToken = IERC20(_governanceToken);
@@ -89,11 +93,6 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
 
     /**
      * @dev Verify user with WorldID
-     * @param root The root of the Merkle tree
-     * @param groupId The group ID for verification
-     * @param signalHash Hash of the signal
-     * @param nullifierHash Hash of the nullifier
-     * @param proof The zero-knowledge proof
      */
     function verifyWithWorldID(
         uint256 root,
@@ -102,9 +101,12 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
         uint256 nullifierHash,
         uint256[8] calldata proof
     ) external {
+        bytes memory signal = abi.encode(msg.sender);
+        
         worldId.verifyProof(
             root,
             groupId,
+            abi.encode(signal),
             signalHash,
             nullifierHash,
             proof
@@ -115,10 +117,6 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
 
     /**
      * @dev Create or update user profile with questionnaire answers
-     * @param _ipfsHash IPFS hash of encrypted profile data
-     * @param _publicKey Public key for encrypted messaging
-     * @param _answers User's answers to questions
-     * @param _preferences User's preferred partner answers
      */
     function createProfile(
         string memory _ipfsHash,
@@ -128,6 +126,8 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
     ) external nonReentrant {
         require(_answers.length == QUESTIONS_COUNT, "Invalid answers count");
         require(_preferences.length == QUESTIONS_COUNT, "Invalid preferences count");
+        require(bytes(_ipfsHash).length > 0, "Invalid IPFS hash");
+        require(bytes(_publicKey).length > 0, "Invalid public key");
         
         if (!profiles[msg.sender].isActive) {
             profiles[msg.sender] = UserProfile({
@@ -142,6 +142,7 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
                 isStaked: false,
                 stakeExpiry: 0
             });
+            emit ProfileCreated(msg.sender, _ipfsHash);
         }
 
         UserProfile storage profile = profiles[msg.sender];
@@ -174,81 +175,77 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
      * @dev Calculate compatibility score between two users
      */
     function calculateCompatibility(address user1, address user2) public view returns (uint256) {
+        require(profiles[user1].isActive && profiles[user2].isActive, "Invalid users");
+        
         UserProfile storage profile1 = profiles[user1];
         UserProfile storage profile2 = profiles[user2];
         
         uint256 score = 0;
         for (uint256 i = 0; i < QUESTIONS_COUNT; i++) {
-            // Check if user1's answers match user2's preferences
             if (profile1.answers[i] == profile2.preferences[i]) {
                 score += 1;
             }
-            // Check if user2's answers match user1's preferences
             if (profile2.answers[i] == profile1.preferences[i]) {
                 score += 1;
             }
         }
         
-        // Score is out of 20 (10 questions * 2 directions)
         return (score * 100) / (QUESTIONS_COUNT * 2);
     }
 
     /**
      * @dev Execute weekly matching process
      */
-    function executeWeeklyMatching() external onlyOwner {
+    function executeWeeklyMatching() external onlyOwner nonReentrant {
         require(block.timestamp >= lastMatchingTime + MATCHING_INTERVAL, "Too early");
         
-        // Clear expired stakes
-        for (uint256 i = matchingQueue.length; i > 0; i--) {
-            address user = matchingQueue[i - 1];
-            if (block.timestamp > profiles[user].stakeExpiry) {
+        uint256 matchesCount = 0;
+        uint256 queueLength = matchingQueue.length;
+        
+        // Clear expired stakes and create a temporary array of valid users
+        address[] memory validUsers = new address[](queueLength);
+        uint256 validCount = 0;
+        
+        for (uint256 i = 0; i < queueLength; i++) {
+            address user = matchingQueue[i];
+            if (block.timestamp <= profiles[user].stakeExpiry) {
+                validUsers[validCount] = user;
+                validCount++;
+            } else {
                 profiles[user].isStaked = false;
-                // Remove from queue by swapping with last element and popping
-                matchingQueue[i - 1] = matchingQueue[matchingQueue.length - 1];
-                matchingQueue.pop();
             }
         }
         
-        // Match users
-        uint256 matchesCount = 0;
-        while (matchingQueue.length >= 2) {
-            address bestMatch1;
-            address bestMatch2;
-            uint256 highestScore = 0;
-            
-            // Find best matching pair
-            for (uint256 i = 0; i < matchingQueue.length; i++) {
-                for (uint256 j = i + 1; j < matchingQueue.length; j++) {
-                    uint256 score = calculateCompatibility(matchingQueue[i], matchingQueue[j]);
-                    if (score > highestScore) {
-                        highestScore = score;
-                        bestMatch1 = matchingQueue[i];
-                        bestMatch2 = matchingQueue[j];
-                    }
+        // Clear the matching queue
+        delete matchingQueue;
+        
+        // Match valid users
+        for (uint256 i = 0; i < validCount; i++) {
+            for (uint256 j = i + 1; j < validCount; j++) {
+                address user1 = validUsers[i];
+                address user2 = validUsers[j];
+                
+                if (profiles[user1].isStaked && profiles[user2].isStaked) {
+                    uint256 compatibilityScore = calculateCompatibility(user1, user2);
+                    
+                    bytes32 matchId = keccak256(abi.encodePacked(user1, user2, block.timestamp));
+                    matches[matchId] = Match({
+                        user1: user1,
+                        user2: user2,
+                        timestamp: block.timestamp,
+                        compatibilityScore: compatibilityScore,
+                        active: true
+                    });
+                    
+                    userMatches[user1].push(user2);
+                    userMatches[user2].push(user1);
+                    
+                    profiles[user1].isStaked = false;
+                    profiles[user2].isStaked = false;
+                    
+                    emit MatchCreated(user1, user2, compatibilityScore);
+                    matchesCount++;
                 }
-            }
-            
-            if (bestMatch1 != address(0) && bestMatch2 != address(0)) {
-                // Create match
-                bytes32 matchId = keccak256(abi.encodePacked(bestMatch1, bestMatch2, block.timestamp));
-                matches[matchId] = Match({
-                    user1: bestMatch1,
-                    user2: bestMatch2,
-                    timestamp: block.timestamp,
-                    compatibilityScore: highestScore,
-                    active: true
-                });
-                
-                userMatches[bestMatch1].push(bestMatch2);
-                userMatches[bestMatch2].push(bestMatch1);
-                
-                // Remove matched users from queue
-                removeFromQueue(bestMatch1);
-                removeFromQueue(bestMatch2);
-                
-                emit MatchCreated(bestMatch1, bestMatch2, highestScore);
-                matchesCount++;
             }
         }
         
@@ -257,16 +254,40 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Remove user from matching queue
+     * @dev Set treasury addresses for fee distribution
      */
-    function removeFromQueue(address user) internal {
-        for (uint256 i = 0; i < matchingQueue.length; i++) {
-            if (matchingQueue[i] == user) {
-                matchingQueue[i] = matchingQueue[matchingQueue.length - 1];
-                matchingQueue.pop();
-                break;
-            }
-        }
+    function setTreasuryAddresses(
+        address _teamWallet,
+        address _rewardsPool,
+        address _treasuryWallet
+    ) external onlyOwner {
+        require(_teamWallet != address(0), "Invalid team wallet");
+        require(_rewardsPool != address(0), "Invalid rewards pool");
+        require(_treasuryWallet != address(0), "Invalid treasury wallet");
+        
+        teamWallet = _teamWallet;
+        rewardsPool = _rewardsPool;
+        treasuryWallet = _treasuryWallet;
+    }
+
+    /**
+     * @dev Withdraw and distribute accumulated fees
+     */
+    function withdrawFees() external nonReentrant {
+        uint256 balance = governanceToken.balanceOf(address(this));
+        require(balance > 0, "No fees to withdraw");
+        require(teamWallet != address(0) && rewardsPool != address(0) && treasuryWallet != address(0), 
+                "Treasury addresses not set");
+
+        uint256 teamShare = (balance * TEAM_SHARE) / 100;
+        uint256 rewardsShare = (balance * REWARDS_SHARE) / 100;
+        uint256 treasuryShare = (balance * TREASURY_SHARE) / 100;
+
+        require(governanceToken.transfer(teamWallet, teamShare), "Team transfer failed");
+        require(governanceToken.transfer(rewardsPool, rewardsShare), "Rewards transfer failed");
+        require(governanceToken.transfer(treasuryWallet, treasuryShare), "Treasury transfer failed");
+
+        emit FeesDistributed(teamShare, rewardsShare, treasuryShare);
     }
 
     /**
@@ -309,76 +330,5 @@ contract DatingProtocol is Ownable, ReentrancyGuard {
      */
     function getQueueLength() external view returns (uint256) {
         return matchingQueue.length;
-    }
-
-    /**
-     * @dev Set treasury addresses for fee distribution
-     * @param _teamWallet Team wallet address
-     * @param _rewardsPool Rewards pool address
-     * @param _treasuryWallet Treasury wallet address
-     */
-    function setTreasuryAddresses(
-        address _teamWallet,
-        address _rewardsPool,
-        address _treasuryWallet
-    ) external onlyOwner {
-        require(_teamWallet != address(0), "Invalid team wallet");
-        require(_rewardsPool != address(0), "Invalid rewards pool");
-        require(_treasuryWallet != address(0), "Invalid treasury wallet");
-        
-        teamWallet = _teamWallet;
-        rewardsPool = _rewardsPool;
-        treasuryWallet = _treasuryWallet;
-    }
-
-    /**
-     * @dev Withdraw and distribute accumulated fees
-     */
-    function withdrawFees() external nonReentrant {
-        uint256 balance = governanceToken.balanceOf(address(this));
-        require(balance > 0, "No fees to withdraw");
-
-        // Calculate shares
-        uint256 teamShare = balance * TEAM_SHARE / 100;
-        uint256 rewardsShare = balance * REWARDS_SHARE / 100;
-        uint256 treasuryShare = balance * TREASURY_SHARE / 100;
-
-        // Transfer shares
-        require(governanceToken.transfer(teamWallet, teamShare), "Team transfer failed");
-        require(governanceToken.transfer(rewardsPool, rewardsShare), "Rewards transfer failed");
-        require(governanceToken.transfer(treasuryWallet, treasuryShare), "Treasury transfer failed");
-    }
-
-    /**
-     * @dev Get user profile
-     * @param user Address of the user
-     * @return UserProfile struct containing user's profile data
-     */
-    function getProfile(address user) external view returns (UserProfile memory) {
-        return profiles[user];
-    }
-
-    /**
-     * @dev Remove a user from the matching queue
-     * @param user Address of the user to remove
-     */
-    function removeFromQueue(address user) internal {
-        for (uint256 i = 0; i < matchingQueue.length; i++) {
-            if (matchingQueue[i] == user) {
-                // Swap with last element and pop
-                matchingQueue[i] = matchingQueue[matchingQueue.length - 1];
-                matchingQueue.pop();
-                break;
-            }
-        }
-    }
-
-    /**
-     * @dev Get matches for a user
-     * @param user Address of the user
-     * @return Array of addresses representing matches
-     */
-    function getUserMatches(address user) external view returns (address[] memory) {
-        return userMatches[user];
     }
 } 
